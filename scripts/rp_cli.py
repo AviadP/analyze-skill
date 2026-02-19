@@ -5,6 +5,9 @@ CLI tool to query Report Portal API and crawl Magna log directories.
 Usage:
     python3 rp_cli.py "<report_portal_url>"       # Query RP, output JSON
     python3 rp_cli.py crawl [-d DEPTH] "<url>"     # Crawl directory listing
+    python3 rp_cli.py hash                          # Hash traceback (stdin)
+    python3 rp_cli.py decide <base_url> <item_id> <issue_type> [--comment "..."]
+                                                    # Set defect type on item
 
 Environment variables:
     RP_TOKEN_FILE - Path to file containing RP API token
@@ -136,6 +139,37 @@ def fetch_json(url: str, api_key: str) -> dict:
         return json.loads(resp.read().decode())
 
 
+def put_json(url: str, api_key: str, payload: dict) -> dict:
+    """
+    HTTP PUT with Bearer auth and JSON body, returns parsed JSON.
+
+    Args:
+        url (str): API endpoint URL.
+        api_key (str): Bearer token for authentication.
+        payload (dict): JSON-serializable request body.
+
+    Returns:
+        dict: Parsed JSON response.
+
+    Raises:
+        urllib.error.HTTPError: If the request fails.
+
+    """
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        url,
+        data=data,
+        method="PUT",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        },
+    )
+    with urllib.request.urlopen(req, context=_ssl_context()) as resp:
+        return json.loads(resp.read().decode())
+
+
 def fetch_launch_info(base_url: str, launch_id: str, api_key: str) -> dict:
     """
     Get launch description, extract logs_url_root and cluster_name.
@@ -226,6 +260,67 @@ def fetch_test_info(base_url: str, item_id: str, api_key: str) -> dict:
         "traceback": traceback,
         "error_message": error_message,
     }
+
+
+ISSUE_TYPE_MAP = {
+    "product_bug": "PB001",
+    "automation_bug": "AB001",
+    "system_issue": "SI001",
+}
+
+
+def update_defect(
+    base_url: str,
+    item_id: str,
+    api_key: str,
+    issue_type: str,
+    comment: str,
+    external_url: str = "",
+    ticket_id: str = "",
+) -> dict:
+    """
+    Set defect type and comment on a test item via RP API.
+
+    Args:
+        base_url (str): RP base URL.
+        item_id (str): Test item ID.
+        api_key (str): Bearer token.
+        issue_type (str): RP locator, e.g. PB001, AB001, SI001.
+        comment (str): Defect comment text.
+        external_url (str): Optional link URL for external ticket.
+        ticket_id (str): Optional ticket ID label.
+
+    Returns:
+        dict: RP API response.
+
+    Raises:
+        urllib.error.HTTPError: If the request fails.
+
+    """
+    issue = {
+        "issueType": issue_type,
+        "comment": comment,
+        "autoAnalyzed": False,
+        "ignoreAnalyzer": False,
+    }
+    if external_url:
+        issue["externalSystemIssues"] = [
+            {
+                "url": external_url,
+                "ticketId": ticket_id or external_url,
+                "btsUrl": external_url,
+                "btsProject": "",
+            }
+        ]
+
+    payload = {
+        "issues": [
+            {"testItemId": int(item_id), "issue": issue}
+        ]
+    }
+
+    url = f"{base_url}/api/v1/{RP_PROJECT}/item"
+    return put_json(url, api_key, payload)
 
 
 def _fetch_page(url: str) -> str:
@@ -428,14 +523,76 @@ def _run_hash() -> None:
     print(compute_traceback_hash(traceback))
 
 
+def _run_decide(args: list) -> None:
+    """
+    Handle 'decide' subcommand: set defect type on an RP test item.
+
+    Args:
+        args (list): [item_id, issue_type, --comment "...", --link-url "...", --link-id "..."]
+
+    """
+    if len(args) < 3:
+        print(
+            "Usage: rp_cli.py decide <base_url> <item_id> <issue_type> "
+            "[--comment '...'] [--link-url '...'] [--link-id '...']"
+            "\n  issue_type: product_bug | automation_bug | system_issue",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    base_url = args[0]
+    item_id = args[1]
+    issue_type_key = args[2]
+
+    if issue_type_key not in ISSUE_TYPE_MAP:
+        print(
+            f"Error: unknown issue_type '{issue_type_key}'. "
+            f"Choose from: {', '.join(ISSUE_TYPE_MAP)}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    comment = ""
+    link_url = ""
+    link_id = ""
+    i = 3
+    while i < len(args):
+        if args[i] == "--comment" and i + 1 < len(args):
+            comment = args[i + 1]
+            i += 2
+        elif args[i] == "--link-url" and i + 1 < len(args):
+            link_url = args[i + 1]
+            i += 2
+        elif args[i] == "--link-id" and i + 1 < len(args):
+            link_id = args[i + 1]
+            i += 2
+        else:
+            print(f"Error: unknown flag '{args[i]}'", file=sys.stderr)
+            sys.exit(1)
+
+    try:
+        api_key = read_token()
+    except FileNotFoundError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    result = update_defect(
+        base_url, item_id, api_key,
+        ISSUE_TYPE_MAP[issue_type_key], comment,
+        external_url=link_url, ticket_id=link_id,
+    )
+    print(json.dumps(result, indent=2))
+
+
 def main() -> None:
-    """Route to query, crawl, or hash subcommand."""
+    """Route to query, crawl, hash, or decide subcommand."""
     if len(sys.argv) < 2:
         print(
             "Usage:\n"
             "  rp_cli.py <report_portal_url>       # Query RP\n"
             "  rp_cli.py crawl [-d DEPTH] <url>     # Crawl directory\n"
-            "  rp_cli.py hash                        # Hash traceback (stdin)",
+            "  rp_cli.py hash                        # Hash traceback (stdin)\n"
+            "  rp_cli.py decide <base_url> <item_id> <issue_type> [opts]  # Set defect",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -446,6 +603,10 @@ def main() -> None:
 
     if sys.argv[1] == "hash":
         _run_hash()
+        return
+
+    if sys.argv[1] == "decide":
+        _run_decide(sys.argv[2:])
         return
 
     _run_query(sys.argv[1])

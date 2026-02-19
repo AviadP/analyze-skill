@@ -26,6 +26,8 @@ allowed_prompts:
     prompt: "clean up downloaded logs"
   - tool: Bash
     prompt: "check if token file exists"
+  - tool: Bash
+    prompt: "run rp_cli.py decide to submit decision to Report Portal"
 ---
 
 # Analyze — OCS-CI Test Failure Analysis
@@ -447,6 +449,43 @@ If classification is **cluster unhealthy before test**, additionally present:
    - Append a row to the "Past failures" table with date, classification, one-line summary
 
    Keep it concise. No general insights — only things that speed up the next analysis of this same test.
+
+### Step 9b: Submit Decision to Report Portal
+
+After the user confirms (or adjusts) the classification in Step 9, submit the
+decision to Report Portal via the API.
+
+1. **Map classification to RP defect type:**
+
+   | Skill Classification | issue_type arg | RP Locator |
+   |---|---|---|
+   | Product bug | `product_bug` | PB001 |
+   | Test framework issue | `automation_bug` | AB001 |
+   | Cluster unhealthy before test | `system_issue` | SI001 |
+   | Infrastructure issue | `system_issue` | SI001 |
+
+2. **Build the comment** from the analysis summary (root cause + evidence,
+   keep it concise — 2-3 sentences max).
+
+3. **If Automation Bug**: ask the user for a fix PR URL or GitHub issue URL.
+   This becomes `--link-url` and `--link-id`.
+
+4. **If Product Bug**: ask the user for a Jira defect URL.
+   This becomes `--link-url` and `--link-id`.
+
+5. **If System Issue**: show a short summary, ask for final approval before
+   submitting. No external link needed.
+
+6. **Submit the decision:**
+   ```bash
+   python3 ~/my_claude_skills/skills/analyze/scripts/rp_cli.py decide \
+     "<base_url>" "<test_item_id>" "<issue_type>" \
+     --comment "<comment>" [--link-url "<url>" --link-id "<id>"]
+   ```
+   `base_url` and `test_item_id` are already known from Step 2.
+
+7. **Confirm** the submission succeeded by checking the JSON output.
+   If it fails, show the error and let the user decide whether to retry.
 
 ### Step 10: Cleanup
 
